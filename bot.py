@@ -324,30 +324,60 @@ def main():
         logger.error("Не удалось собрать новости ни с одного источника")
         return
 
-    # 2. Выбираем лучшую новость
-    selected = select_best_news(all_news)
-    if not selected:
+    # Приоритизируем RSS-новости (у них есть summary) над web-парсингом
+    rss_news = [n for n in all_news if n.get("summary")]
+    news_pool = rss_news if rss_news else all_news
+
+    # Пробуем до 3 раз выбрать новость и сгенерировать статью
+    tried = set()
+    for attempt in range(3):
+        # 2. Выбираем новость
+        available = [n for i, n in enumerate(news_pool) if i not in tried]
+        if not available:
+            available = [n for i, n in enumerate(all_news) if i not in tried]
+        if not available:
+            logger.error("Закончились новости для попыток")
+            return
+
+        selected = select_best_news(available)
+        if not selected:
+            return
+
+        tried.add(news_pool.index(selected) if selected in news_pool else 0)
+
+        # 3. Скачиваем полный текст и изображение
+        article_text, image_url = fetch_article_text(selected["link"])
+        if not article_text:
+            article_text = selected.get("summary", selected["title"])
+
+        # Проверяем что есть достаточно контента для генерации
+        if len(article_text) < 50:
+            logger.warning(f"Слишком мало контента ({len(article_text)} символов), пробуем другую новость")
+            continue
+
+        # 4. Если нет картинки из статьи — берём из RSS
+        if not image_url and selected.get("image"):
+            image_url = selected["image"]
+            logger.info(f"Используем картинку из RSS: {image_url[:100]}")
+
+        # 5. Если всё ещё нет — берём stock-фото
+        if not image_url:
+            image_url = find_fallback_image()
+
+        # 6. Генерируем статью
+        article = generate_article(selected, article_text)
+
+        # 7. Проверяем что GPT не отказался генерировать
+        refusal_markers = ["на жаль", "не можу", "не вдалося", "не маю змоги", "надайте", "якщо ви наведете"]
+        if any(marker in article.lower() for marker in refusal_markers):
+            logger.warning(f"GPT отказался генерировать статью, попытка {attempt + 1}/3")
+            continue
+
+        # 8. Публикуем в Telegram (с фото)
+        send_to_telegram(article, image_url)
         return
 
-    # 3. Скачиваем полный текст и изображение
-    article_text, image_url = fetch_article_text(selected["link"])
-    if not article_text:
-        article_text = selected.get("summary", selected["title"])
-
-    # 4. Если нет картинки из статьи — берём из RSS
-    if not image_url and selected.get("image"):
-        image_url = selected["image"]
-        logger.info(f"Используем картинку из RSS: {image_url[:100]}")
-
-    # 5. Если всё ещё нет — берём stock-фото
-    if not image_url:
-        image_url = find_fallback_image()
-
-    # 6. Генерируем статью
-    article = generate_article(selected, article_text)
-
-    # 7. Публикуем в Telegram (с фото)
-    send_to_telegram(article, image_url)
+    logger.error("Не удалось сгенерировать статью за 3 попытки")
 
     logger.info("=== Бот завершил работу ===")
 
