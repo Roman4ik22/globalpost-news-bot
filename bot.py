@@ -5,6 +5,7 @@
 
 import os
 import re
+import random
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -247,20 +248,24 @@ def generate_article(news: dict, article_text: str) -> str:
     return article
 
 
-def find_fallback_image(query: str) -> str | None:
-    """Найти картинку через Unsplash (бесплатный API без ключа)."""
-    try:
-        # Unsplash Source — бесплатный редирект на фото по запросу
-        keywords = "logistics shipping container cargo port"
-        url = f"https://source.unsplash.com/1200x630/?{keywords}"
-        resp = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
-        if resp.status_code == 200:
-            image_url = resp.url
-            logger.info(f"Fallback изображение от Unsplash: {image_url[:100]}")
-            return image_url
-    except Exception as e:
-        logger.warning(f"Не удалось получить fallback изображение: {e}")
-    return None
+# Набор бесплатных логистических фото (Wikimedia Commons, public domain)
+FALLBACK_IMAGES = [
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/Container_ship_Elly_Maersk.jpg/1280px-Container_ship_Elly_Maersk.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Shipping_containers_at_Clyde.jpg/1280px-Shipping_containers_at_Clyde.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Container_port.jpg/1280px-Container_port.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Warehouse_with_packages.jpg/1280px-Warehouse_with_packages.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d4/Cargo_airplane_loading.jpg/1280px-Cargo_airplane_loading.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/Bremerhaven_Containerhafen_2012.jpg/1280px-Bremerhaven_Containerhafen_2012.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b5/Maersk_Line_Triple-E_Mette_Maersk.jpg/1280px-Maersk_Line_Triple-E_Mette_Maersk.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4f/Eurogate_Containerterminal_Hamburg.jpg/1280px-Eurogate_Containerterminal_Hamburg.jpg",
+]
+
+
+def find_fallback_image() -> str:
+    """Выбрать случайное логистическое фото из набора."""
+    image = random.choice(FALLBACK_IMAGES)
+    logger.info(f"Используем fallback изображение: {image.split('/')[-1]}")
+    return image
 
 
 def send_to_telegram(text: str, image_url: str | None = None) -> bool:
@@ -349,9 +354,9 @@ def main():
         image_url = selected["image"]
         logger.info(f"Используем картинку из RSS: {image_url[:100]}")
 
-    # 5. Если всё ещё нет — ищем stock-фото
+    # 5. Если всё ещё нет — берём stock-фото
     if not image_url:
-        image_url = find_fallback_image(selected["title"])
+        image_url = find_fallback_image()
 
     # 6. Генерируем статью
     article = generate_article(selected, article_text)
