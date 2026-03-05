@@ -1,0 +1,31 @@
+name: Daily GlobalPost News
+
+on:
+  schedule:
+    # 13:00 UTC = 15:00 Kyiv (зима, UTC+2) / 16:00 Kyiv (лето, UTC+3)
+    # Для точных 15:00 летом используй "0 12 * * *"
+    - cron: "0 13 * * *"
+  workflow_dispatch: # Ручной запуск для тестирования
+
+jobs:
+  post-news:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python bot.py
