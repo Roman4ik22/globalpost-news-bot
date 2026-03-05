@@ -1,8 +1,7 @@
 """Список источников новостей для парсинга."""
 
-# Каждый источник: (название, URL RSS-фида или страницы, тип: "rss" или "web", категория)
 SOURCES = [
-    # I. Глобальная аналитика и новости рынка
+    # I. Глобальная аналитика и новости рынка (RSS — надёжные)
     {
         "name": "Supply Chain Dive",
         "url": "https://www.supplychaindive.com/feeds/news/",
@@ -22,20 +21,38 @@ SOURCES = [
         "category": "analytics",
     },
     {
-        "name": "Logistics Management",
-        "url": "https://www.logisticsmgmt.com/rss",
-        "type": "rss",
-        "category": "analytics",
-    },
-    {
         "name": "Air Cargo News",
         "url": "https://www.aircargonews.net/feed/",
         "type": "rss",
         "category": "analytics",
     },
     {
-        "name": "Reuters Business",
-        "url": "https://www.reuters.com/arc/outboundfeeds/v3/all/rss.xml",
+        "name": "gCaptain",
+        "url": "https://gcaptain.com/feed/",
+        "type": "rss",
+        "category": "analytics",
+    },
+    {
+        "name": "Splash247",
+        "url": "https://splash247.com/feed/",
+        "type": "rss",
+        "category": "analytics",
+    },
+    {
+        "name": "Port Technology",
+        "url": "https://www.porttechnology.org/feed/",
+        "type": "rss",
+        "category": "infrastructure",
+    },
+    {
+        "name": "Journal of Commerce",
+        "url": "https://www.joc.com/rss/news",
+        "type": "rss",
+        "category": "analytics",
+    },
+    {
+        "name": "Hellenic Shipping News",
+        "url": "https://www.hellenicshippingnews.com/feed/",
         "type": "rss",
         "category": "analytics",
     },
@@ -48,21 +65,7 @@ SOURCES = [
         "category": "customs",
     },
 
-    # III. Продовольча логістика, Фарма та Зерно
-    {
-        "name": "World Grain",
-        "url": "https://www.world-grain.com/rss",
-        "type": "rss",
-        "category": "agro",
-    },
-    {
-        "name": "GCCA Cold Chain",
-        "url": "https://www.gcca.org/news",
-        "type": "web",
-        "category": "cold_chain",
-    },
-
-    # IV. Інфраструктура та великі проекти
+    # III. Інфраструктура
     {
         "name": "Maritime Executive",
         "url": "https://maritime-executive.com/feed",
@@ -76,37 +79,11 @@ SOURCES = [
         "category": "infrastructure",
     },
 
-    # V. Офіційні медіа-центри операторів
-    {
-        "name": "FedEx Newsroom",
-        "url": "https://newsroom.fedex.com/newsroom/feeds/",
-        "type": "rss",
-        "category": "operators",
-    },
-    {
-        "name": "DHL Press Center",
-        "url": "https://www.dhl.com/global-en/home/press/press-archive.html",
-        "type": "web",
-        "category": "operators",
-    },
+    # IV. Оператори
     {
         "name": "UPS Pressroom",
         "url": "https://about.ups.com/us/en/newsroom.html",
         "type": "web",
         "category": "operators",
-    },
-
-    # Дополнительные
-    {
-        "name": "LogisticsTI",
-        "url": "https://logisticsti.com/",
-        "type": "web",
-        "category": "analytics",
-    },
-    {
-        "name": "Supply Chain Digital",
-        "url": "https://supplychaindigital.com/feed",
-        "type": "rss",
-        "category": "analytics",
     },
 ]

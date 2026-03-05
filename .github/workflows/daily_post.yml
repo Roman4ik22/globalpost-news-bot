@@ -2,10 +2,9 @@ name: Daily GlobalPost News
 
 on:
   schedule:
-    # 13:00 UTC = 15:00 Kyiv (зима, UTC+2) / 16:00 Kyiv (лето, UTC+3)
-    # Для точных 15:00 летом используй "0 12 * * *"
-    - cron: "0 13 * * *"
-  workflow_dispatch: # Ручной запуск для тестирования
+    # 13:00 UTC = 15:00 Kyiv (зима UTC+2) / 16:00 (лето UTC+3)
+    - cron: "0 13 * * 1-5"  # Только пн-пт
+  workflow_dispatch: # Ручной запуск
 
 jobs:
   post-news:
@@ -29,3 +28,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         run: python bot.py
+
+      - name: Save history
+        run: |
+          git config user.name "GlobalPost Bot"
+          git config user.email "bot@globalpost.ua"
+          git add history.json
+          git diff --staged --quiet || git commit -m "Update publish history [skip ci]"
+          git push
