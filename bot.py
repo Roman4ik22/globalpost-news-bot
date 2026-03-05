@@ -113,12 +113,42 @@ def collect_all_news() -> list[dict]:
     return all_news
 
 
-def fetch_article_text(url: str) -> str:
-    """Скачать и извлечь текст статьи по URL."""
+def fetch_article_text(url: str) -> tuple[str, str | None]:
+    """Скачать и извлечь текст статьи и главное изображение по URL.
+    Возвращает (текст, url_изображения или None)."""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Ищем главное изображение
+        image_url = None
+        # 1. Open Graph meta tag (самый надёжный способ)
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            image_url = og_image["content"]
+        else:
+            # 2. Twitter card image
+            tw_image = soup.find("meta", attrs={"name": "twitter:image"})
+            if tw_image and tw_image.get("content"):
+                image_url = tw_image["content"]
+            else:
+                # 3. Первое большое изображение в article
+                article_tag = soup.find("article") or soup.find("main")
+                if article_tag:
+                    for img in article_tag.find_all("img", src=True):
+                        src = img["src"]
+                        # Пропускаем иконки и мелкие изображения
+                        width = img.get("width", "")
+                        if width and width.isdigit() and int(width) < 200:
+                            continue
+                        if not src.startswith("http"):
+                            src = requests.compat.urljoin(url, src)
+                        image_url = src
+                        break
+
+        if image_url:
+            logger.info(f"Найдено изображение: {image_url[:100]}")
 
         # Удаляем ненужные элементы
         for tag in soup.find_all(["script", "style", "nav", "footer", "header", "aside"]):
@@ -131,11 +161,10 @@ def fetch_article_text(url: str) -> str:
         else:
             text = soup.get_text(separator="\n", strip=True)
 
-        # Ограничиваем размер текста
-        return text[:5000]
+        return text[:5000], image_url
     except Exception as e:
         logger.warning(f"Ошибка загрузки статьи {url}: {e}")
-        return ""
+        return "", None
 
 
 def select_best_news(news: list[dict]) -> dict | None:
@@ -201,11 +230,48 @@ def generate_article(news: dict, article_text: str) -> str:
     return article
 
 
-def send_to_telegram(text: str) -> bool:
-    """Отправить сообщение в Telegram-канал."""
+def send_to_telegram(text: str, image_url: str | None = None) -> bool:
+    """Отправить сообщение в Telegram-канал. Если есть фото — отправляет как фото с подписью."""
+
+    if image_url:
+        # Отправляем фото с подписью (caption ограничен 1024 символами)
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        if len(text) > 1024:
+            # Если текст длиннее 1024 — отправляем фото + отдельное сообщение
+            payload = {
+                "chat_id": TELEGRAM_CHANNEL_ID,
+                "photo": image_url,
+            }
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                logger.info("Фото отправлено в Telegram")
+            else:
+                logger.warning(f"Не удалось отправить фото: {resp.status_code}")
+
+            # Отправляем текст отдельным сообщением
+            return _send_text(text)
+        else:
+            payload = {
+                "chat_id": TELEGRAM_CHANNEL_ID,
+                "photo": image_url,
+                "caption": text,
+                "parse_mode": "HTML",
+            }
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                logger.info("Пост с фото отправлен в Telegram")
+                return True
+            else:
+                logger.warning(f"Не удалось отправить фото: {resp.status_code}, отправляю без фото")
+                return _send_text(text)
+    else:
+        return _send_text(text)
+
+
+def _send_text(text: str) -> bool:
+    """Отправить текстовое сообщение в Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    # Telegram ограничивает сообщения 4096 символами
     if len(text) > 4096:
         text = text[:4090] + "..."
 
@@ -219,7 +285,7 @@ def send_to_telegram(text: str) -> bool:
     resp = requests.post(url, json=payload, timeout=15)
 
     if resp.status_code == 200:
-        logger.info("Пост успешно отправлен в Telegram")
+        logger.info("Пост отправлен в Telegram")
         return True
     else:
         logger.error(f"Ошибка отправки в Telegram: {resp.status_code} — {resp.text}")
@@ -240,17 +306,16 @@ def main():
     if not selected:
         return
 
-    # 3. Скачиваем полный текст
-    article_text = fetch_article_text(selected["link"])
+    # 3. Скачиваем полный текст и изображение
+    article_text, image_url = fetch_article_text(selected["link"])
     if not article_text:
-        # Используем summary если не удалось скачать
         article_text = selected.get("summary", selected["title"])
 
     # 4. Генерируем статью
     article = generate_article(selected, article_text)
 
-    # 5. Публикуем в Telegram
-    send_to_telegram(article)
+    # 5. Публикуем в Telegram (с фото если найдено)
+    send_to_telegram(article, image_url)
 
     logger.info("=== Бот завершил работу ===")
 
