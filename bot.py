@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-import anthropic
+from openai import OpenAI
 
 from sources import SOURCES
 from prompts import SELECTOR_PROMPT, ARTICLE_PROMPT
@@ -19,7 +19,7 @@ from prompts import SELECTOR_PROMPT, ARTICLE_PROMPT
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 
@@ -150,15 +150,17 @@ def select_best_news(news: list[dict]) -> dict | None:
         for i, item in enumerate(news)
     )
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=10,
-        system=SELECTOR_PROMPT,
-        messages=[{"role": "user", "content": f"Ось список новин:\n\n{news_list}"}],
+        messages=[
+            {"role": "system", "content": SELECTOR_PROMPT},
+            {"role": "user", "content": f"Ось список новин:\n\n{news_list}"},
+        ],
     )
 
-    answer = response.content[0].text.strip()
+    answer = response.choices[0].message.content.strip()
     # Извлекаем число из ответа
     match = re.search(r"\d+", answer)
     if match:
@@ -174,7 +176,7 @@ def select_best_news(news: list[dict]) -> dict | None:
 
 def generate_article(news: dict, article_text: str) -> str:
     """Сгенерировать статью через Claude API."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
     user_message = f"""Новина для адаптації:
 
@@ -185,14 +187,16 @@ def generate_article(news: dict, article_text: str) -> str:
 Повний текст статті:
 {article_text}"""
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+    response = client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=2000,
-        system=ARTICLE_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
+        messages=[
+            {"role": "system", "content": ARTICLE_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
     )
 
-    article = response.content[0].text.strip()
+    article = response.choices[0].message.content.strip()
     logger.info(f"Статья сгенерирована, длина: {len(article)} символов")
     return article
 
