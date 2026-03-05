@@ -248,16 +248,16 @@ def generate_article(news: dict, article_text: str) -> str:
     return article
 
 
-# Набор бесплатных логистических фото (Wikimedia Commons, public domain)
+# Набор бесплатных логистических фото (Pexels, free license)
 FALLBACK_IMAGES = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/Container_ship_Elly_Maersk.jpg/1280px-Container_ship_Elly_Maersk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Shipping_containers_at_Clyde.jpg/1280px-Shipping_containers_at_Clyde.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Container_port.jpg/1280px-Container_port.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Warehouse_with_packages.jpg/1280px-Warehouse_with_packages.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d4/Cargo_airplane_loading.jpg/1280px-Cargo_airplane_loading.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/Bremerhaven_Containerhafen_2012.jpg/1280px-Bremerhaven_Containerhafen_2012.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b5/Maersk_Line_Triple-E_Mette_Maersk.jpg/1280px-Maersk_Line_Triple-E_Mette_Maersk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4f/Eurogate_Containerterminal_Hamburg.jpg/1280px-Eurogate_Containerterminal_Hamburg.jpg",
+    "https://images.pexels.com/photos/1427107/pexels-photo-1427107.jpeg?auto=compress&cs=tinysrgb&w=1260",  # контейнеровоз
+    "https://images.pexels.com/photos/2226458/pexels-photo-2226458.jpeg?auto=compress&cs=tinysrgb&w=1260",  # порт с кранами
+    "https://images.pexels.com/photos/1117210/pexels-photo-1117210.jpeg?auto=compress&cs=tinysrgb&w=1260",  # контейнеры
+    "https://images.pexels.com/photos/3846128/pexels-photo-3846128.jpeg?auto=compress&cs=tinysrgb&w=1260",  # склад
+    "https://images.pexels.com/photos/906494/pexels-photo-906494.jpeg?auto=compress&cs=tinysrgb&w=1260",    # грузовик
+    "https://images.pexels.com/photos/1427541/pexels-photo-1427541.jpeg?auto=compress&cs=tinysrgb&w=1260",  # карго самолёт
+    "https://images.pexels.com/photos/2547565/pexels-photo-2547565.jpeg?auto=compress&cs=tinysrgb&w=1260",  # контейнерный терминал
+    "https://images.pexels.com/photos/1267338/pexels-photo-1267338.jpeg?auto=compress&cs=tinysrgb&w=1260",  # порт ночью
 ]
 
 
@@ -269,61 +269,46 @@ def find_fallback_image() -> str:
 
 
 def send_to_telegram(text: str, image_url: str | None = None) -> bool:
-    """Отправить сообщение в Telegram-канал. Если есть фото — отправляет как фото с подписью."""
+    """Отправить пост в Telegram-канал. Фото + текст = один пост."""
+
+    # Обрезаем текст до лимита caption (1024 символа)
+    if len(text) > 1024:
+        text = text[:1020] + "..."
+        logger.warning(f"Текст обрезан до 1024 символов")
 
     if image_url:
-        # Отправляем фото с подписью (caption ограничен 1024 символами)
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        if len(text) > 1024:
-            # Если текст длиннее 1024 — отправляем фото + отдельное сообщение
-            payload = {
-                "chat_id": TELEGRAM_CHANNEL_ID,
-                "photo": image_url,
-            }
-            resp = requests.post(url, json=payload, timeout=15)
-            if resp.status_code == 200:
-                logger.info("Фото отправлено в Telegram")
-            else:
-                logger.warning(f"Не удалось отправить фото: {resp.status_code}")
+        payload = {
+            "chat_id": TELEGRAM_CHANNEL_ID,
+            "photo": image_url,
+            "caption": text,
+            "parse_mode": "HTML",
+        }
+        resp = requests.post(url, json=payload, timeout=15)
 
-            # Отправляем текст отдельным сообщением
-            return _send_text(text)
+        if resp.status_code == 200:
+            logger.info("Пост с фото отправлен в Telegram")
+            return True
         else:
-            payload = {
-                "chat_id": TELEGRAM_CHANNEL_ID,
-                "photo": image_url,
-                "caption": text,
-                "parse_mode": "HTML",
-            }
-            resp = requests.post(url, json=payload, timeout=15)
-            if resp.status_code == 200:
-                logger.info("Пост с фото отправлен в Telegram")
-                return True
-            else:
-                logger.warning(f"Не удалось отправить фото: {resp.status_code}, отправляю без фото")
-                return _send_text(text)
+            logger.warning(f"Не удалось отправить фото ({resp.status_code}), отправляю текстом")
+            # Fallback — отправляем без фото
+            return _send_text_only(text)
     else:
-        return _send_text(text)
+        return _send_text_only(text)
 
 
-def _send_text(text: str) -> bool:
-    """Отправить текстовое сообщение в Telegram."""
+def _send_text_only(text: str) -> bool:
+    """Fallback: отправить только текст."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    if len(text) > 4096:
-        text = text[:4090] + "..."
-
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
-
     resp = requests.post(url, json=payload, timeout=15)
-
     if resp.status_code == 200:
-        logger.info("Пост отправлен в Telegram")
+        logger.info("Пост отправлен в Telegram (без фото)")
         return True
     else:
         logger.error(f"Ошибка отправки в Telegram: {resp.status_code} — {resp.text}")
