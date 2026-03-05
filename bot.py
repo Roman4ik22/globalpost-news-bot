@@ -23,7 +23,8 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 
-USER_AGENT = "GlobalPostBot/1.0"
+# Используем реалистичный User-Agent чтобы избежать блокировок 403
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
 
 
@@ -43,12 +44,28 @@ def fetch_rss_news(source: dict, since_hours: int = 48) -> list[dict]:
             if published and published < cutoff:
                 continue
 
+            # Пытаемся достать картинку из RSS
+            image = None
+            if hasattr(entry, "media_content") and entry.media_content:
+                for media in entry.media_content:
+                    if media.get("medium") == "image" or media.get("type", "").startswith("image"):
+                        image = media.get("url")
+                        break
+            if not image and hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+                image = entry.media_thumbnail[0].get("url")
+            if not image and hasattr(entry, "enclosures") and entry.enclosures:
+                for enc in entry.enclosures:
+                    if enc.get("type", "").startswith("image"):
+                        image = enc.get("href") or enc.get("url")
+                        break
+
             news.append({
                 "title": entry.get("title", ""),
                 "link": entry.get("link", ""),
                 "summary": entry.get("summary", "")[:500],
                 "source": source["name"],
                 "published": published.isoformat() if published else "",
+                "image": image,
             })
         logger.info(f"RSS {source['name']}: {len(news)} новостей")
         return news
@@ -230,6 +247,22 @@ def generate_article(news: dict, article_text: str) -> str:
     return article
 
 
+def find_fallback_image(query: str) -> str | None:
+    """Найти картинку через Unsplash (бесплатный API без ключа)."""
+    try:
+        # Unsplash Source — бесплатный редирект на фото по запросу
+        keywords = "logistics shipping container cargo port"
+        url = f"https://source.unsplash.com/1200x630/?{keywords}"
+        resp = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
+        if resp.status_code == 200:
+            image_url = resp.url
+            logger.info(f"Fallback изображение от Unsplash: {image_url[:100]}")
+            return image_url
+    except Exception as e:
+        logger.warning(f"Не удалось получить fallback изображение: {e}")
+    return None
+
+
 def send_to_telegram(text: str, image_url: str | None = None) -> bool:
     """Отправить сообщение в Telegram-канал. Если есть фото — отправляет как фото с подписью."""
 
@@ -311,10 +344,19 @@ def main():
     if not article_text:
         article_text = selected.get("summary", selected["title"])
 
-    # 4. Генерируем статью
+    # 4. Если нет картинки из статьи — берём из RSS
+    if not image_url and selected.get("image"):
+        image_url = selected["image"]
+        logger.info(f"Используем картинку из RSS: {image_url[:100]}")
+
+    # 5. Если всё ещё нет — ищем stock-фото
+    if not image_url:
+        image_url = find_fallback_image(selected["title"])
+
+    # 6. Генерируем статью
     article = generate_article(selected, article_text)
 
-    # 5. Публикуем в Telegram (с фото если найдено)
+    # 7. Публикуем в Telegram (с фото)
     send_to_telegram(article, image_url)
 
     logger.info("=== Бот завершил работу ===")
