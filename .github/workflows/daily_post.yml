@@ -3,7 +3,7 @@ name: Daily GlobalPost News
 on:
   schedule:
     # 13:00 UTC = 15:00 Kyiv (зима UTC+2) / 16:00 (лето UTC+3)
-    - cron: "0 13 * * 1-5"  # Только пн-пт
+    - cron: "0 13 * * *"  # Каждый день 15:00 Kyiv
   workflow_dispatch: # Ручной запуск
 
 jobs:

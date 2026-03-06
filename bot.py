@@ -30,15 +30,27 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 HEADERS = {"User-Agent": USER_AGENT}
 
 HISTORY_FILE = Path(__file__).parent / "history.json"
+SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
-# Ротация форматов: пн-новость, вт-цифра, ср-аналитика, чт-новость, пт-цифра
+# Ротация форматов по дням недели
 FORMAT_SCHEDULE = {
     0: "news",      # Понедельник
     1: "stat",      # Вторник
     2: "analysis",  # Среда
     3: "news",      # Четверг
     4: "stat",      # Пятница
+    5: "news",      # Суббота
+    6: "analysis",  # Воскресенье
 }
+
+
+def load_settings() -> dict:
+    if SETTINGS_FILE.exists():
+        try:
+            return json.loads(SETTINGS_FILE.read_text())
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return {"post_on_weekends": True, "format_override": None, "paused": False}
 
 
 # === История публикаций (защита от дубликатов) ===
@@ -327,16 +339,24 @@ def send_to_telegram(text: str, image_url: str | None = None) -> bool:
 def main():
     logger.info("=== Запуск бота GlobalPost News ===")
 
-    # Пропускаем выходные (сб=5, вс=6)
-    today = datetime.now(timezone.utc)
-    weekday = today.weekday()
-    if weekday >= 5:
-        logger.info(f"Выходной (день {weekday}), пропускаем")
+    settings = load_settings()
+    force = os.environ.get("FORCE_POST") == "1"
+
+    # Проверяем паузу
+    if settings.get("paused") and not force:
+        logger.info("Бот на паузе (настройка paused=true)")
         return
 
-    # Определяем формат поста на сегодня
-    format_type = FORMAT_SCHEDULE.get(weekday, "news")
-    logger.info(f"Формат на сегодня: {format_type}")
+    # Проверяем выходные
+    today = datetime.now(timezone.utc)
+    weekday = today.weekday()
+    if weekday >= 5 and not settings.get("post_on_weekends", True) and not force:
+        logger.info(f"Выходной (день {weekday}), пропускаем (настройка)")
+        return
+
+    # Определяем формат: override из настроек или по расписанию
+    format_type = settings.get("format_override") or FORMAT_SCHEDULE.get(weekday, "news")
+    logger.info(f"Формат: {format_type}")
 
     # Загружаем историю
     history = load_history()
