@@ -96,6 +96,34 @@ def is_good_image(url: str) -> bool:
     return not any(p in url_lower for p in BAD_IMAGE_PATTERNS)
 
 
+# Ключевые слова для фильтрации релевантных новостей (логистика + укр. бизнес)
+LOGISTICS_KEYWORDS = [
+    # Логистика и перевозки
+    "shipping", "freight", "cargo", "logistics", "container", "port", "vessel",
+    "maritime", "ocean", "sea", "air cargo", "airfreight", "trucking", "rail",
+    "supply chain", "warehouse", "distribution", "delivery", "transport",
+    "forwarding", "carrier", "fleet", "bulk", "tanker",
+    # Торговля и таможня
+    "tariff", "customs", "trade", "import", "export", "duty", "sanction",
+    "embargo", "quota", "regulation", "compliance", "border",
+    # Маршруты и регионы
+    "china", "asia", "europe", "ukraine", "turkey", "suez", "panama",
+    "mediterranean", "black sea", "baltic", "red sea", "silk road",
+    # Ставки и финансы
+    "rate", "cost", "price", "fee", "surcharge", "index", "teu", "feu",
+    "spot", "contract", "market",
+    # Инфраструктура
+    "terminal", "dock", "berth", "canal", "strait", "route", "corridor",
+    "pipeline", "hub",
+]
+
+
+def is_relevant_news(news_item: dict) -> bool:
+    """Проверить что новость связана с логистикой/торговлей."""
+    text = (news_item.get("title", "") + " " + news_item.get("summary", "")).lower()
+    return any(kw in text for kw in LOGISTICS_KEYWORDS)
+
+
 # === Парсинг ===
 
 def fetch_rss_news(source: dict, since_hours: int = 72) -> list[dict]:
@@ -377,7 +405,106 @@ def send_to_telegram(text: str, image_url: str | None = None) -> bool:
     return False
 
 
-# === Main ===
+# === Подготовка поста (без публикации) ===
+
+def prepare_post(exclude_links: list[str] | None = None) -> dict | None:
+    """Подготовить пост: парсинг → выбор → генерация. Возвращает dict с результатом."""
+    settings = load_settings()
+    today = datetime.now(timezone.utc)
+    weekday = today.weekday()
+    format_type = settings.get("format_override") or FORMAT_SCHEDULE.get(weekday, "news")
+
+    history = load_history()
+    all_news = collect_all_news()
+    if not all_news:
+        return None
+
+    already_used = set(history + (exclude_links or []))
+    fresh = [n for n in all_news if n["link"] not in already_used]
+    if not fresh:
+        fresh = all_news
+
+    # Фильтруем только релевантные новости (логистика, торговля, укр. бизнес)
+    relevant = [n for n in fresh if is_relevant_news(n)]
+    logger.info(f"Релевантных: {len(relevant)} из {len(fresh)}")
+    if not relevant:
+        relevant = fresh  # fallback если фильтр слишком строгий
+
+    with_numbers = [n for n in relevant if n.get("summary") and re.search(r'\d', n["title"])]
+    with_summary = [n for n in relevant if n.get("summary")]
+    pool = with_numbers or with_summary or relevant
+
+    for attempt in range(3):
+        selected = select_best_news(pool)
+        if not selected:
+            return None
+        pool = [n for n in pool if n["link"] != selected["link"]]
+
+        article_text, image_url = fetch_article_content(selected["link"])
+        if not article_text:
+            article_text = selected.get("summary") or selected["title"]
+        if len(article_text) < 30:
+            continue
+
+        if not image_url and selected.get("image"):
+            image_url = selected["image"]
+        if image_url and not check_image_url(image_url):
+            image_url = None
+        if not image_url:
+            image_url = random.choice(FALLBACK_IMAGES)
+
+        article = generate_article(selected, article_text, format_type)
+        if not validate_post(article):
+            continue
+
+        return {
+            "text": article,
+            "image_url": image_url,
+            "news": selected,
+            "article_text": article_text,
+            "format_type": format_type,
+        }
+
+    return None
+
+
+def edit_post(current_text: str, instruction: str, news: dict, article_text: str) -> str:
+    """Отредактировать пост по инструкции пользователя через GPT."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=1500,
+        temperature=0.7,
+        messages=[
+            {"role": "system", "content": (
+                "Ти — копірайтер Telegram-каналу GlobalPost.ua. "
+                "Тобі надано поточний пост і інструкцію від редактора. "
+                "Виправ пост згідно з інструкцією. "
+                "Зберігай формат, HTML-теги (<b>, <a href>, <i>), хештеги та посилання. "
+                "МАКСИМУМ 900 символів. МОВА: українська. "
+                "Виведи ТІЛЬКИ виправлений текст посту."
+            )},
+            {"role": "user", "content": (
+                f"Поточний пост:\n\n{current_text}\n\n"
+                f"Оригінальна стаття:\n{article_text[:2000]}\n\n"
+                f"Інструкція редактора: {instruction}"
+            )},
+        ],
+    )
+    return response.choices[0].message.content.strip()
+
+
+def publish_post(text: str, image_url: str | None, news_link: str) -> bool:
+    """Опубликовать пост и сохранить в историю."""
+    if send_to_telegram(text, image_url):
+        history = load_history()
+        history.append(news_link)
+        save_history(history)
+        return True
+    return False
+
+
+# === Main (автопубликация для GitHub Actions) ===
 
 def main():
     logger.info("=== GlobalPost News Bot ===")
@@ -399,76 +526,20 @@ def main():
         logger.info("Выходной, пропускаем")
         return
 
-    format_type = settings.get("format_override") or FORMAT_SCHEDULE.get(weekday, "news")
-    logger.info(f"Формат: {format_type} | День: {weekday}")
-
-    history = load_history()
-
-    # 1. Собираем и фильтруем
-    all_news = collect_all_news()
-    if not all_news:
-        logger.error("Нет новостей")
+    # Проверяем режим модерации
+    if settings.get("moderation") and not force:
+        logger.info("Режим модерации — пост ожидает ручного утверждения через админ-бот")
         return
 
-    fresh = [n for n in all_news if n["link"] not in history]
-    logger.info(f"Свежих: {len(fresh)} из {len(all_news)}")
-    if not fresh:
-        fresh = all_news
+    result = prepare_post()
+    if not result:
+        logger.error("Не удалось подготовить пост")
+        return
 
-    # Приоритет: новости с summary и цифрами (более информативные)
-    with_numbers = [n for n in fresh if n.get("summary") and re.search(r'\d', n["title"])]
-    with_summary = [n for n in fresh if n.get("summary")]
-    pool = with_numbers or with_summary or fresh
-
-    # 2. Пробуем до 3 раз
-    tried = set()
-    for attempt in range(3):
-        available = [n for n in pool if n["link"] not in tried]
-        if not available:
-            available = [n for n in fresh if n["link"] not in tried]
-        if not available:
-            logger.error("Нет доступных новостей")
-            return
-
-        selected = select_best_news(available)
-        if not selected:
-            return
-        tried.add(selected["link"])
-
-        # 3. Контент
-        article_text, image_url = fetch_article_content(selected["link"])
-        if not article_text:
-            article_text = selected.get("summary") or selected["title"]
-        if len(article_text) < 30:
-            logger.warning(f"Мало контента, следующая попытка")
-            continue
-
-        # 4. Изображение: статья → RSS → fallback (с проверкой доступности)
-        if not image_url and selected.get("image"):
-            image_url = selected["image"]
-        if image_url and not check_image_url(image_url):
-            logger.warning(f"Изображение недоступно: {image_url[:60]}")
-            image_url = None
-        if not image_url:
-            image_url = random.choice(FALLBACK_IMAGES)
-
-        # 5. Генерация
-        article = generate_article(selected, article_text, format_type)
-
-        # 6. Валидация
-        if not validate_post(article):
-            logger.warning(f"Пост не прошёл валидацию, попытка {attempt + 1}/3")
-            continue
-
-        # 7. Публикация
-        if send_to_telegram(article, image_url):
-            history.append(selected["link"])
-            save_history(history)
-
+    if publish_post(result["text"], result["image_url"], result["news"]["link"]):
         logger.info("=== Готово ===")
-        return
-
-    logger.error("Не удалось за 3 попытки")
+    else:
+        logger.error("Не удалось опубликовать")
 
 
 if __name__ == "__main__":
