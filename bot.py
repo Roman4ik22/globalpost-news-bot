@@ -22,9 +22,9 @@ from prompts import SELECTOR_PROMPT, get_article_prompt
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
@@ -32,17 +32,31 @@ HEADERS = {"User-Agent": USER_AGENT}
 HISTORY_FILE = Path(__file__).parent / "history.json"
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
-# Ротация форматов по дням недели
 FORMAT_SCHEDULE = {
-    0: "news",      # Понедельник
-    1: "stat",      # Вторник
-    2: "analysis",  # Среда
-    3: "news",      # Четверг
-    4: "stat",      # Пятница
-    5: "news",      # Суббота
-    6: "analysis",  # Воскресенье
+    0: "news", 1: "stat", 2: "analysis",
+    3: "news", 4: "stat", 5: "news", 6: "analysis",
 }
 
+# Паттерны для фильтрации плохих изображений
+BAD_IMAGE_PATTERNS = [
+    "logo", "icon", "avatar", "brand", "favicon", "badge", "banner-ad",
+    "placeholder", "default", "pixel", "tracking", "1x1", "blank",
+    "PinExt", "share", "social", "button", "sprite",
+]
+
+FALLBACK_IMAGES = [
+    "https://images.pexels.com/photos/1427107/pexels-photo-1427107.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/2226458/pexels-photo-2226458.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/1117210/pexels-photo-1117210.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/3846128/pexels-photo-3846128.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/906494/pexels-photo-906494.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/1427541/pexels-photo-1427541.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/2547565/pexels-photo-2547565.jpeg?auto=compress&cs=tinysrgb&w=1260",
+    "https://images.pexels.com/photos/1267338/pexels-photo-1267338.jpeg?auto=compress&cs=tinysrgb&w=1260",
+]
+
+
+# === Settings & History ===
 
 def load_settings() -> dict:
     if SETTINGS_FILE.exists():
@@ -53,34 +67,44 @@ def load_settings() -> dict:
     return {"post_on_weekends": True, "format_override": None, "paused": False}
 
 
-# === История публикаций (защита от дубликатов) ===
-
 def load_history() -> list[str]:
-    """Загрузить список ранее опубликованных URL."""
     if HISTORY_FILE.exists():
         try:
-            data = json.loads(HISTORY_FILE.read_text())
-            return data.get("published", [])
+            return json.loads(HISTORY_FILE.read_text()).get("published", [])
         except (json.JSONDecodeError, KeyError):
-            return []
+            pass
     return []
 
 
 def save_history(published: list[str]):
-    """Сохранить историю. Храним последние 90 записей."""
     published = published[-90:]
     HISTORY_FILE.write_text(json.dumps({"published": published}, indent=2))
 
 
-# === Парсинг новостей ===
+# === Утилиты ===
 
-def fetch_rss_news(source: dict, since_hours: int = 48) -> list[dict]:
-    """Получить новости из RSS-фида за последние N часов."""
+def clean_html(text: str) -> str:
+    """Убрать HTML-теги из текста (для очистки RSS summary)."""
+    return BeautifulSoup(text, "html.parser").get_text(separator=" ", strip=True)
+
+
+def is_good_image(url: str) -> bool:
+    """Проверить что URL — это реальное фото, а не логотип/иконка."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    return not any(p in url_lower for p in BAD_IMAGE_PATTERNS)
+
+
+# === Парсинг ===
+
+def fetch_rss_news(source: dict, since_hours: int = 72) -> list[dict]:
+    """Получить новости из RSS за последние N часов."""
     try:
         feed = feedparser.parse(source["url"], agent=USER_AGENT)
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
         news = []
-        for entry in feed.entries[:20]:
+        for entry in feed.entries[:25]:
             published = None
             if hasattr(entry, "published_parsed") and entry.published_parsed:
                 published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
@@ -105,118 +129,80 @@ def fetch_rss_news(source: dict, since_hours: int = 48) -> list[dict]:
                         image = enc.get("href") or enc.get("url")
                         break
 
+            # Очищаем summary от HTML
+            summary = clean_html(entry.get("summary", ""))[:500]
+
             news.append({
-                "title": entry.get("title", ""),
+                "title": entry.get("title", "").strip(),
                 "link": entry.get("link", ""),
-                "summary": entry.get("summary", "")[:500],
+                "summary": summary,
                 "source": source["name"],
                 "published": published.isoformat() if published else "",
-                "image": image,
+                "image": image if is_good_image(image) else None,
             })
-        logger.info(f"RSS {source['name']}: {len(news)} новостей")
+        logger.info(f"RSS {source['name']}: {len(news)}")
         return news
     except Exception as e:
-        logger.warning(f"Ошибка RSS {source['name']}: {e}")
-        return []
-
-
-def fetch_web_news(source: dict) -> list[dict]:
-    """Получить заголовки новостей с веб-страницы."""
-    try:
-        resp = requests.get(source["url"], headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        news = []
-        for link in soup.find_all("a", href=True):
-            text = link.get_text(strip=True)
-            if len(text) < 20 or len(text) > 300:
-                continue
-            href = link["href"]
-            if not href.startswith("http"):
-                href = requests.compat.urljoin(source["url"], href)
-
-            skip_patterns = ["login", "signup", "contact", "about", "privacy", "cookie", "javascript:"]
-            if any(p in href.lower() for p in skip_patterns):
-                continue
-
-            news.append({
-                "title": text,
-                "link": href,
-                "summary": "",
-                "source": source["name"],
-                "published": "",
-            })
-
-        seen = set()
-        unique = []
-        for item in news[:15]:
-            if item["title"] not in seen:
-                seen.add(item["title"])
-                unique.append(item)
-
-        logger.info(f"WEB {source['name']}: {len(unique)} новостей")
-        return unique
-    except Exception as e:
-        logger.warning(f"Ошибка WEB {source['name']}: {e}")
+        logger.warning(f"RSS {source['name']}: {e}")
         return []
 
 
 def collect_all_news() -> list[dict]:
-    """Собрать новости со всех источников."""
+    """Собрать новости со всех RSS-источников."""
     all_news = []
     for source in SOURCES:
         if source["type"] == "rss":
             all_news.extend(fetch_rss_news(source))
-        elif source["type"] == "web":
-            all_news.extend(fetch_web_news(source))
-    logger.info(f"Всего собрано: {len(all_news)} новостей")
+    logger.info(f"Всего: {len(all_news)} новостей")
     return all_news
 
 
 # === Работа со статьями ===
 
-def fetch_article_text(url: str) -> tuple[str, str | None]:
-    """Скачать текст статьи и главное изображение."""
+def fetch_article_content(url: str) -> tuple[str, str | None]:
+    """Скачать текст и изображение статьи."""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Ищем изображение
+        # Ищем изображение (приоритет: og:image → twitter:image → первое в article)
         image_url = None
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
-            image_url = og_image["content"]
-        else:
-            tw_image = soup.find("meta", attrs={"name": "twitter:image"})
-            if tw_image and tw_image.get("content"):
-                image_url = tw_image["content"]
-            else:
-                article_tag = soup.find("article") or soup.find("main")
-                if article_tag:
-                    for img in article_tag.find_all("img", src=True):
-                        src = img["src"]
-                        width = img.get("width", "")
-                        if width and width.isdigit() and int(width) < 200:
-                            continue
-                        if not src.startswith("http"):
-                            src = requests.compat.urljoin(url, src)
+        for meta_prop in ["og:image", "og:image:url"]:
+            tag = soup.find("meta", property=meta_prop)
+            if tag and tag.get("content") and is_good_image(tag["content"]):
+                image_url = tag["content"]
+                break
+
+        if not image_url:
+            tw = soup.find("meta", attrs={"name": "twitter:image"})
+            if tw and tw.get("content") and is_good_image(tw["content"]):
+                image_url = tw["content"]
+
+        if not image_url:
+            article_tag = soup.find("article") or soup.find("main")
+            if article_tag:
+                for img in article_tag.find_all("img", src=True):
+                    src = img["src"]
+                    if not src.startswith("http"):
+                        src = requests.compat.urljoin(url, src)
+                    width = img.get("width", "")
+                    if width and width.isdigit() and int(width) < 200:
+                        continue
+                    if is_good_image(src):
                         image_url = src
                         break
 
-        if image_url:
-            logger.info(f"Изображение: {image_url[:80]}")
-
-        for tag in soup.find_all(["script", "style", "nav", "footer", "header", "aside"]):
+        # Извлекаем текст
+        for tag in soup.find_all(["script", "style", "nav", "footer", "header", "aside", "form"]):
             tag.decompose()
 
         article = soup.find("article") or soup.find("main") or soup.find("body")
-        text = article.get_text(separator="\n", strip=True) if article else soup.get_text(separator="\n", strip=True)
+        text = article.get_text(separator="\n", strip=True) if article else ""
 
         return text[:5000], image_url
     except Exception as e:
-        logger.warning(f"Ошибка загрузки {url}: {e}")
+        logger.warning(f"Загрузка {url}: {e}")
         return "", None
 
 
@@ -227,8 +213,10 @@ def select_best_news(news: list[dict]) -> dict | None:
     if not news:
         return None
 
+    # Передаём заголовок + описание для лучшего выбора
     news_list = "\n".join(
         f"{i+1}. [{item['source']}] {item['title']}"
+        + (f" — {item['summary'][:200]}" if item.get("summary") else "")
         for i, item in enumerate(news)
     )
 
@@ -238,7 +226,7 @@ def select_best_news(news: list[dict]) -> dict | None:
         max_tokens=10,
         messages=[
             {"role": "system", "content": SELECTOR_PROMPT},
-            {"role": "user", "content": f"Ось список новин:\n\n{news_list}"},
+            {"role": "user", "content": f"Список новин:\n\n{news_list}"},
         ],
     )
 
@@ -247,10 +235,9 @@ def select_best_news(news: list[dict]) -> dict | None:
     if match:
         idx = int(match.group()) - 1
         if 0 <= idx < len(news):
-            logger.info(f"Выбрана: {news[idx]['title']} ({news[idx]['source']})")
+            logger.info(f"Выбрана: {news[idx]['title'][:60]}... ({news[idx]['source']})")
             return news[idx]
 
-    logger.warning(f"Не удалось распарсить выбор: '{answer}', берём первую")
     return news[0]
 
 
@@ -258,23 +245,23 @@ def generate_article(news: dict, article_text: str, format_type: str) -> str:
     """Сгенерировать пост через GPT-4o."""
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    system_prompt = get_article_prompt(format_type, news["link"])
+    prompt = get_article_prompt(format_type, news["link"])
 
-    user_message = f"""Новина для адаптації:
-
+    user_msg = f"""Новина:
 Заголовок: {news['title']}
 Джерело: {news['source']}
-Посилання: {news['link']}
+URL: {news['link']}
 
-Текст:
+Текст статті:
 {article_text}"""
 
     response = client.chat.completions.create(
         model="gpt-4o",
-        max_tokens=2000,
+        max_tokens=1500,
+        temperature=0.7,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_msg},
         ],
     )
 
@@ -283,153 +270,205 @@ def generate_article(news: dict, article_text: str, format_type: str) -> str:
     return article
 
 
+def validate_post(text: str) -> bool:
+    """Проверить качество поста перед публикацией."""
+    if len(text) < 100:
+        logger.warning(f"Пост слишком короткий: {len(text)} символов")
+        return False
+
+    # Проверяем что GPT не отказался
+    refusals = ["на жаль", "не можу", "не вдалося", "не маю змоги", "надайте", "якщо ви наведете", "sorry", "i can't"]
+    if any(r in text.lower() for r in refusals):
+        logger.warning("GPT отказался генерировать")
+        return False
+
+    # Проверяем наличие обязательных элементов
+    if "globalpost.ua" not in text:
+        logger.warning("Нет ссылки на GlobalPost")
+
+    if "#" not in text:
+        logger.warning("Нет хештегов")
+
+    return True
+
+
+def check_image_url(url: str) -> bool:
+    """Проверить что изображение доступно (HEAD запрос)."""
+    try:
+        resp = requests.head(url, headers=HEADERS, timeout=5, allow_redirects=True)
+        content_type = resp.headers.get("content-type", "")
+        return resp.status_code == 200 and "image" in content_type
+    except Exception:
+        return False
+
+
+def trim_post_to_limit(text: str, limit: int = 1024) -> str:
+    """Обрезать пост до лимита, не ломая HTML-теги и хештеги."""
+    if len(text) <= limit:
+        return text
+
+    # Находим хештеги в конце
+    lines = text.rstrip().split("\n")
+    hashtag_line = ""
+    if lines and lines[-1].strip().startswith("#"):
+        hashtag_line = "\n" + lines[-1].strip()
+        text_body = "\n".join(lines[:-1]).rstrip()
+    else:
+        text_body = text
+
+    available = limit - len(hashtag_line) - 4  # "...\n"
+    if available < 100:
+        return text[:limit]
+
+    trimmed = text_body[:available]
+
+    # Не обрезаем посреди HTML-тега
+    open_tag = trimmed.rfind("<")
+    close_tag = trimmed.rfind(">")
+    if open_tag > close_tag:
+        trimmed = trimmed[:open_tag]
+
+    # Закрываем незакрытые теги
+    open_tags = re.findall(r"<(b|i|a)[^>]*>", trimmed)
+    close_tags = re.findall(r"</(b|i|a)>", trimmed)
+    for tag in reversed(open_tags[len(close_tags):]):
+        tag_name = tag.split()[0] if " " in tag else tag
+        trimmed += f"</{tag_name}>"
+
+    return trimmed.rstrip() + "..." + hashtag_line
+
+
 # === Telegram ===
 
-FALLBACK_IMAGES = [
-    "https://images.pexels.com/photos/1427107/pexels-photo-1427107.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/2226458/pexels-photo-2226458.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/1117210/pexels-photo-1117210.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/3846128/pexels-photo-3846128.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/906494/pexels-photo-906494.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/1427541/pexels-photo-1427541.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/2547565/pexels-photo-2547565.jpeg?auto=compress&cs=tinysrgb&w=1260",
-    "https://images.pexels.com/photos/1267338/pexels-photo-1267338.jpeg?auto=compress&cs=tinysrgb&w=1260",
-]
-
-
 def send_to_telegram(text: str, image_url: str | None = None) -> bool:
-    """Отправить пост в Telegram. Фото + текст = один пост."""
-    if len(text) > 1024:
-        text = text[:1020] + "..."
-        logger.warning("Текст обрезан до 1024 символов")
+    """Фото + текст = один пост."""
+    text = trim_post_to_limit(text, 1024)
 
     if image_url:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        payload = {
-            "chat_id": TELEGRAM_CHANNEL_ID,
-            "photo": image_url,
-            "caption": text,
-            "parse_mode": "HTML",
-        }
-        resp = requests.post(url, json=payload, timeout=15)
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+            json={
+                "chat_id": TELEGRAM_CHANNEL_ID,
+                "photo": image_url,
+                "caption": text,
+                "parse_mode": "HTML",
+            },
+            timeout=15,
+        )
         if resp.status_code == 200:
             logger.info("Пост с фото отправлен")
             return True
-        else:
-            logger.warning(f"Фото не отправлено ({resp.status_code}), пробуем без фото")
+        logger.warning(f"Фото не отправлено ({resp.status_code}), пробуем без")
 
-    # Fallback: без фото
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
-    resp = requests.post(url, json=payload, timeout=15)
+    resp = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": TELEGRAM_CHANNEL_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        },
+        timeout=15,
+    )
     if resp.status_code == 200:
         logger.info("Пост отправлен (без фото)")
         return True
-    logger.error(f"Ошибка Telegram: {resp.status_code} — {resp.text}")
+    logger.error(f"Telegram: {resp.status_code} — {resp.text}")
     return False
 
 
 # === Main ===
 
 def main():
-    logger.info("=== Запуск бота GlobalPost News ===")
+    logger.info("=== GlobalPost News Bot ===")
+
+    if not OPENAI_API_KEY or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        logger.error("Missing env vars: OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID")
+        return
 
     settings = load_settings()
     force = os.environ.get("FORCE_POST") == "1"
 
-    # Проверяем паузу
     if settings.get("paused") and not force:
-        logger.info("Бот на паузе (настройка paused=true)")
+        logger.info("Бот на паузе")
         return
 
-    # Проверяем выходные
     today = datetime.now(timezone.utc)
     weekday = today.weekday()
     if weekday >= 5 and not settings.get("post_on_weekends", True) and not force:
-        logger.info(f"Выходной (день {weekday}), пропускаем (настройка)")
+        logger.info("Выходной, пропускаем")
         return
 
-    # Определяем формат: override из настроек или по расписанию
     format_type = settings.get("format_override") or FORMAT_SCHEDULE.get(weekday, "news")
-    logger.info(f"Формат: {format_type}")
+    logger.info(f"Формат: {format_type} | День: {weekday}")
 
-    # Загружаем историю
     history = load_history()
 
-    # 1. Собираем новости
+    # 1. Собираем и фильтруем
     all_news = collect_all_news()
     if not all_news:
         logger.error("Нет новостей")
         return
 
-    # Фильтруем уже опубликованные
-    fresh_news = [n for n in all_news if n["link"] not in history]
-    logger.info(f"После фильтра дубликатов: {len(fresh_news)} из {len(all_news)}")
+    fresh = [n for n in all_news if n["link"] not in history]
+    logger.info(f"Свежих: {len(fresh)} из {len(all_news)}")
+    if not fresh:
+        fresh = all_news
 
-    if not fresh_news:
-        logger.warning("Все новости уже были опубликованы")
-        fresh_news = all_news  # fallback
+    # Приоритет: новости с summary и цифрами (более информативные)
+    with_numbers = [n for n in fresh if n.get("summary") and re.search(r'\d', n["title"])]
+    with_summary = [n for n in fresh if n.get("summary")]
+    pool = with_numbers or with_summary or fresh
 
-    # Приоритизируем RSS
-    rss_news = [n for n in fresh_news if n.get("summary")]
-    news_pool = rss_news if rss_news else fresh_news
-
-    # Пробуем до 3 раз
-    tried_links = set()
+    # 2. Пробуем до 3 раз
+    tried = set()
     for attempt in range(3):
-        available = [n for n in news_pool if n["link"] not in tried_links]
+        available = [n for n in pool if n["link"] not in tried]
         if not available:
-            available = [n for n in fresh_news if n["link"] not in tried_links]
+            available = [n for n in fresh if n["link"] not in tried]
         if not available:
-            logger.error("Закончились новости")
+            logger.error("Нет доступных новостей")
             return
 
         selected = select_best_news(available)
         if not selected:
             return
+        tried.add(selected["link"])
 
-        tried_links.add(selected["link"])
-
-        # Скачиваем текст и картинку
-        article_text, image_url = fetch_article_text(selected["link"])
+        # 3. Контент
+        article_text, image_url = fetch_article_content(selected["link"])
         if not article_text:
-            article_text = selected.get("summary", selected["title"])
-
-        if len(article_text) < 50:
-            logger.warning(f"Мало контента ({len(article_text)}), пробуем другую")
+            article_text = selected.get("summary") or selected["title"]
+        if len(article_text) < 30:
+            logger.warning(f"Мало контента, следующая попытка")
             continue
 
-        # Картинка: статья → RSS → fallback
+        # 4. Изображение: статья → RSS → fallback (с проверкой доступности)
         if not image_url and selected.get("image"):
             image_url = selected["image"]
+        if image_url and not check_image_url(image_url):
+            logger.warning(f"Изображение недоступно: {image_url[:60]}")
+            image_url = None
         if not image_url:
             image_url = random.choice(FALLBACK_IMAGES)
 
-        # Генерируем
+        # 5. Генерация
         article = generate_article(selected, article_text, format_type)
 
-        # Проверяем отказ GPT
-        refusal_markers = ["на жаль", "не можу", "не вдалося", "не маю змоги", "надайте", "якщо ви наведете"]
-        if any(m in article.lower() for m in refusal_markers):
-            logger.warning(f"GPT отказался, попытка {attempt + 1}/3")
+        # 6. Валидация
+        if not validate_post(article):
+            logger.warning(f"Пост не прошёл валидацию, попытка {attempt + 1}/3")
             continue
 
-        # Публикуем
+        # 7. Публикация
         if send_to_telegram(article, image_url):
-            # Сохраняем в историю
             history.append(selected["link"])
             save_history(history)
-            logger.info(f"Сохранено в историю: {selected['link']}")
 
-        logger.info("=== Бот завершил работу ===")
+        logger.info("=== Готово ===")
         return
 
-    logger.error("Не удалось сгенерировать за 3 попытки")
+    logger.error("Не удалось за 3 попытки")
 
 
 if __name__ == "__main__":
